@@ -1,0 +1,49 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: scraper
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: scraper
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U scraper"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  scraper:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    restart: unless-stopped
+    stop_grace_period: 30s  # matches TimeoutStopSec in deploy/scraper.service; gives the SIGTERM handler in scheduler/runner.py time to shut the scheduler + shared browser down cleanly
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://scraper:${POSTGRES_PASSWORD}@db:5432/scraper
+      NOTIFIER_BOT_TOKEN: ${NOTIFIER_BOT_TOKEN}
+      NOTIFIER_CHAT_ID: ${NOTIFIER_CHAT_ID}
+      MAX_CONCURRENT_FETCHES: ${MAX_CONCURRENT_FETCHES:-5}
+      MAX_CONCURRENT_PLAYWRIGHT: ${MAX_CONCURRENT_PLAYWRIGHT:-2}
+      DEFAULT_POLL_INTERVAL_SEC: ${DEFAULT_POLL_INTERVAL_SEC:-900}
+      DOWNLOAD_MEDIA: ${DOWNLOAD_MEDIA:-false}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      HEARTBEAT_FILE: /app/data/heartbeat
+    volumes:
+      - ../config:/app/config:ro
+      - media_data:/app/data
+    command: ["run"]
+    healthcheck:
+      test: ["CMD", "/app/deploy/healthcheck.sh"]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+volumes:
+  pgdata:
+  media_data:

@@ -1,0 +1,43 @@
+sources:
+  - name: "Example: static news site"
+    type: html
+    url: "https://example.com/news"
+    enabled: false
+    poll_interval_sec: 1800
+    respect_robots: true
+    config:
+      list_selector: "article.news-item"
+      item_selectors:
+        title: "h2.title"
+        text: "div.content"
+        date: "time[datetime]"
+        date_attr: "datetime"
+        link: "a.permalink"
+        link_attr: "href"
+        media: "img.thumb"
+        media_attr: "src"
+
+  - name: "Example: JS-heavy site"
+    type: playwright
+    url: "https://spa-example.com/feed"
+    enabled: false
+    poll_interval_sec: 3600
+    config:
+      wait_for_selector: ".feed-item"
+      scroll_iterations: 3
+      scroll_pause_ms: 800
+      list_selector: ".feed-item"
+      item_selectors:
+        text: ".feed-item__text"
+        date: ".feed-item__date"
+        media: "img"
+        media_attr: "src"
+
+  - name: "Example: public Telegram channel"
+    type: telegram
+    url: "https://t.me/s/durov"
+    enabled: false
+    poll_interval_sec: 600
+    config:
+      channel: "durov"
+      max_pages: 1

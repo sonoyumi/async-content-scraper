@@ -1,0 +1,59 @@
+[Unit]
+Description=Universal Python scraper (Telegram + web sources)
+After=network-online.target
+Wants=network-online.target
+# Uncomment if PostgreSQL runs as a separate systemd-managed service on the
+# same host (skip this if you use the Docker Compose deployment instead):
+# After=network-online.target postgresql.service
+# Requires=postgresql.service
+
+[Service]
+Type=simple
+User=scraper
+Group=scraper
+WorkingDirectory=/opt/scraper
+EnvironmentFile=/opt/scraper/.env
+
+# Entry point: the long-running "run" command (seed sources, then poll every
+# enabled source on its own schedule). See src/scraper/cli.py.
+ExecStart=/opt/scraper/.venv/bin/scraper run
+
+# --- Reliability: restart on crash / OOM / hang, never on manual stop ---
+Restart=on-failure
+RestartSec=5
+# Escalating cool-off if it keeps crashing, instead of a hot restart loop
+# that hammers the target sites or the DB every 5 seconds forever:
+StartLimitIntervalSec=300
+StartLimitBurst=6
+
+# --- Graceful shutdown ---
+# runner.py now installs a SIGTERM handler and shuts the scheduler + the
+# shared Playwright browser down cleanly. TimeoutStopSec bounds how long
+# systemd waits before escalating to SIGKILL if that hangs.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# --- Hardening (safe defaults for a network-facing scraper daemon) ---
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/scraper/data
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+
+# --- Resource caps (adjust to your server; prevents one runaway Chromium
+# instance or a media-download burst from taking down the whole host) ---
+MemoryMax=1536M
+TasksMax=512
+
+# --- Logging: stdout/stderr -> journald (logging_config.py emits JSON lines) ---
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=scraper
+
+[Install]
+WantedBy=multi-user.target
