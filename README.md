@@ -10,7 +10,7 @@
   <img alt="Tests" src="https://img.shields.io/badge/tests-pytest-yellow">
 </p>
 
-**🇬🇧 [English](#en)** · **🇷🇺 [Русский](#ru)**
+**🇬🇧 [English](#en)** · **🇮🇹 [Italiano](#it)** · **🇺🇦 [Українська](#uk)** · **🇷🇺 [Русский](#ru)**
 
 ---
 
@@ -145,11 +145,281 @@ MIT, see [LICENSE](LICENSE).
 
 ---
 
+<a name="it"></a>
+
+## 🇮🇹 Italiano
+
+**[🇬🇧 English](#en)** · **🇮🇹 Italiano** · **[🇺🇦 Українська](#uk)** · **[🇷🇺 Русский](#ru)**
+
+Un servizio Python asincrono per il monitoraggio continuo (24/7) di siti web pubblici e
+canali Telegram: trova i nuovi post, elimina i duplicati a livello di database
+e invia un riepilogo (digest) su Telegram. Progettato come servizio di produzione, non come
+script usa e getta: arresto controllato (graceful shutdown), backoff sulle fonti che falliscono,
+monitoraggio dello stato di salute, deploy con systemd/Docker.
+
+> **⚠️ Avvertenza.** Questo repository dimostra competenze di architettura. Gli algoritmi
+> di parsing unici sono stati rimossi per tutelare la proprietà intellettuale. Vedi
+> [Cosa è incluso e cosa no](#it-scope) più sotto.
+
+### Cosa fa
+
+- **Siti web:** richiesta HTTP + BeautifulSoup con selettori CSS configurabili
+  (una nuova fonte non richiede nemmeno una riga di Python, tutto si configura tramite YAML/CLI),
+  oppure Chromium headless tramite Playwright per le pagine pesanti in JS / con scroll infinito.
+- **Canali Telegram pubblici:** nessun token né login, solo dati aperti
+  (nella versione pubblica questa parte è uno stub documentato, vedi l'avvertenza).
+- **Archiviazione:** SQLAlchemy 2.0, SQLite per lo sviluppo, PostgreSQL per la produzione
+  (gli stessi modelli funzionano con entrambi).
+- **Deduplicazione:** gestita da vincoli UNIQUE nel database
+  (`ON CONFLICT DO NOTHING ... RETURNING id`) invece del "controlla e poi inserisci",
+  il che esclude le race condition tra cicli di polling concorrenti.
+- **Notifiche:** un digest dei nuovi post su Telegram, con una corretta
+  gestione del rate limit (HTTP 429) e i digest lunghi divisi in più parti.
+
+### Architettura
+
+```
+scheduler (AsyncIOScheduler, 1 job per fonte)
+        │
+        ▼
+   poller.poll_source  ──►  Fetcher (HTTP / Playwright)
+        │                          │
+        │                          ▼
+        │                    Extractor (parsing BS4 con selettori CSS)
+        │                          │
+        ▼                          ▼
+   backoff sugli errori     Storage (SQLAlchemy + dedup con vincolo UNIQUE)
+        │                          │
+        ▼                          ▼
+   heartbeat + healthcheck   Notifier (Telegram Bot API, digest)
+```
+
+Ogni componente sta dietro una classe base astratta (`Fetcher`, `Extractor`),
+quindi aggiungere un nuovo tipo di fonte non richiede modifiche al resto del codice.
+
+### Scelte ingegneristiche da guardare
+
+- **`asyncio.Semaphore` + `AsyncLimiter` per dominio:** la concorrenza è limitata
+  sia a livello globale *sia* per singolo dominio, così più fonti sullo stesso host non
+  si sommano mai in un DDoS involontario (`scheduler/queue.py`).
+- **SQLAlchemy sincrono senza bloccare l'event loop:** le operazioni sul DB girano in
+  `asyncio.to_thread`, così una query al database non blocca il download concorrente
+  delle altre fonti (`poller.py`).
+- **L'I/O di rete non tiene mai aperta una transazione del DB:** download dei media e
+  notifiche avvengono fuori dalla sessione, e il risultato viene poi salvato in una
+  transazione breve e separata (vedi `_download_pending_media`,
+  `_notify_new_posts`).
+- **Arresto controllato su SIGTERM**, non solo su SIGINT: lo scheduler e il browser
+  headless condiviso si chiudono in modo pulito con `systemctl stop` / `docker stop` invece di
+  essere terminati allo scadere del timeout (`scheduler/runner.py`).
+- **Backoff sugli errori ripetuti:** una fonte che continua a fallire (per esempio dopo
+  un restyling del sito) viene interrogata sempre più di rado invece di essere martellata
+  allo stesso intervallo all'infinito.
+- **Healthcheck basato su heartbeat:** un segnale separato "l'event loop sta davvero
+  rispondendo", non solo "il processo è vivo secondo il PID"
+  (`deploy/healthcheck.sh`, collegato sia all'`HEALTHCHECK` di Docker sia a un timer systemd).
+
+### Stack
+
+`Python 3.11+` · `asyncio` · `httpx` · `BeautifulSoup4` · `Playwright` ·
+`SQLAlchemy 2.0` + `Alembic` · `PostgreSQL` / `SQLite` · `APScheduler` ·
+`Pydantic v2` + `pydantic-settings` · `tenacity` · `aiolimiter` ·
+`structlog` · `Typer` + `Rich` · `pytest` + `pytest-asyncio` + `respx` ·
+`ruff` + `mypy`
+
+### Avvio rapido
+
+```bash
+python3 -m venv .venv
+./.venv/bin/pip install -e ".[dev]"
+./.venv/bin/scraper init-db
+cp config/sources.example.yaml config/sources.yaml   # attiva le fonti che ti servono
+./.venv/bin/scraper seed --config-file config/sources.yaml
+./.venv/bin/scraper test-source --config-file config/sources.yaml --name "Example: static news site"
+./.venv/bin/pytest -q
+```
+
+La CI (`.github/workflows/ci.yml`) esegue `ruff check`, `mypy` e `pytest` a ogni push.
+
+### Deploy
+
+- `docker compose -f docker/docker-compose.yml up --build -d`: Postgres +
+  il servizio, con healthcheck già pronto.
+- Una unit systemd per il deploy su bare metal: `deploy/scraper.service` +
+  `deploy/healthcheck.sh` (hardening: `ProtectSystem=strict`,
+  `NoNewPrivileges`, limiti di memoria, policy di riavvio controllato).
+
+<a name="it-scope"></a>
+
+### Cosa è incluso e cosa no
+
+La versione pubblica dimostra per intero l'architettura: concorrenza, lavoro con il
+database, deduplicazione, tolleranza ai guasti e deploy. **Non è inclusa**
+l'implementazione funzionante del parsing del markup dei canali Telegram
+(`extractors/telegram_extractor.py` è uno stub documentato che solleva
+`NotImplementedError` con una spiegazione). È l'unica parte che, nella
+versione privata, contiene una logica specifica e collaudata sul campo, pronta per un uso
+commerciale diretto senza modifiche. Tutto il resto (l'estrattore HTML, lo scheduler,
+la deduplicazione, la configurazione di deploy) funziona esattamente come nella versione di produzione.
+
+### Autore
+
+**Vladyslav Shokun** ([@sonoyumi](https://github.com/sonoyumi)), sviluppatore Python:
+bot Telegram, web scraping, servizi asincroni.
+
+[![Telegram](https://img.shields.io/badge/Telegram-write%20me-2CA5E0?logo=telegram&logoColor=white)](https://t.me/sonoyumiii)
+[![Email](https://img.shields.io/badge/Email-contact-EA4335?logo=gmail&logoColor=white)](mailto:sonoyumiii@gmail.com)
+
+> 💼 Ti serve il monitoraggio di siti web, uno scraper o un bot per il tuo compito? Scrivimi.
+
+### Licenza
+
+MIT, vedi [LICENSE](LICENSE).
+
+---
+
+<a name="uk"></a>
+
+## 🇺🇦 Українська
+
+**[🇬🇧 English](#en)** · **[🇮🇹 Italiano](#it)** · **🇺🇦 Українська** · **[🇷🇺 Русский](#ru)**
+
+Асинхронний сервіс на Python для безперервного (24/7) моніторингу публічних
+вебсайтів і Telegram-каналів: знаходить нові публікації, дедуплікує їх на
+рівні БД і надсилає дайджест у Telegram. Спроєктований як
+production-сервіс, а не як одноразовий скрипт: graceful shutdown,
+backoff при збоях джерела, health-моніторинг, деплой через systemd/Docker.
+
+> **⚠️ Дисклеймер.** Цей репозиторій є демонстрацією архітектурних
+> навичок. Унікальні алгоритми парсингу видалено з метою захисту інтелектуальної
+> власності — див. розділ [«Що показано, а що ні»](#uk-scope) нижче.
+
+### Що робить сервіс
+
+- **Сайти** — HTTP-запит + BeautifulSoup з конфігурованими CSS-селекторами
+  (жодного рядка Python на нове джерело — усе через YAML/CLI), або
+  headless Chromium через Playwright для JS-важких сторінок / сторінок з нескінченним скролом.
+- **Публічні Telegram-канали** — без токенів і логіну, лише відкриті
+  дані (у публічній збірці ця частина — задокументована заглушка, див.
+  дисклеймер).
+- **Зберігання** — SQLAlchemy 2.0, SQLite для розробки, PostgreSQL для продакшену
+  (ті самі моделі працюють з обома).
+- **Дедуплікація** — на рівні UNIQUE-обмежень у БД
+  (`ON CONFLICT DO NOTHING ... RETURNING id`), а не через
+  «перевірив-потім-вставив» — це виключає гонки між конкурентними циклами опитування.
+- **Сповіщення** — дайджест нових постів у Telegram з коректною
+  обробкою rate-limit (HTTP 429) і розбиттям довгих дайджестів на частини.
+
+### Архітектура
+
+```
+scheduler (AsyncIOScheduler, 1 job на джерело)
+        │
+        ▼
+   poller.poll_source  ──►  Fetcher (HTTP / Playwright)
+        │                          │
+        │                          ▼
+        │                    Extractor (BS4-парсинг за CSS-селекторами)
+        │                          │
+        ▼                          ▼
+   backoff при збоях        Storage (SQLAlchemy + dedup через UNIQUE constraint)
+        │                          │
+        ▼                          ▼
+   heartbeat + healthcheck   Notifier (Telegram Bot API, дайджест)
+```
+
+Кожен компонент — за абстрактним базовим класом (`Fetcher`, `Extractor`),
+тому додавання нового типу джерела не потребує змін в іншому коді.
+
+### Інженерні рішення, на які варто подивитися
+
+- **`asyncio.Semaphore` + `AsyncLimiter` для кожного домену** — конкурентність
+  обмежена глобально *і* окремо для кожного домену, щоб кілька
+  джерел на одному хості навіть випадково не створювали ефект DDoS
+  (`scheduler/queue.py`).
+- **Синхронний SQLAlchemy без блокування event loop** — операції з БД винесено в
+  `asyncio.to_thread`, щоб запит до БД не блокував конкурентні запити до інших
+  джерел (`poller.py`).
+- **Мережевий I/O ніколи не тримає відкритою транзакцію БД** — завантаження медіа
+  й надсилання сповіщень виконуються поза сесією, а результат зберігається
+  окремою короткою транзакцією після цього (див. `_download_pending_media`,
+  `_notify_new_posts`).
+- **Graceful shutdown за SIGTERM**, а не лише SIGINT: планувальник і спільний
+  екземпляр headless-браузера коректно закриваються при `systemctl stop` /
+  `docker stop`, а не просто вбиваються за таймаутом (`scheduler/runner.py`).
+- **Backoff при повторюваних помилках** — джерело, яке стабільно
+  падає (наприклад, після редизайну сайту), опитується дедалі рідше, а не
+  довбається з тим самим інтервалом безкінечно.
+- **Healthcheck на основі heartbeat** — окремий сигнал «event loop справді
+  відповідає», а не просто «процес живий за PID» (`deploy/healthcheck.sh`,
+  підключено і в Docker `HEALTHCHECK`, і в systemd-таймер).
+
+### Стек
+
+`Python 3.11+` · `asyncio` · `httpx` · `BeautifulSoup4` · `Playwright` ·
+`SQLAlchemy 2.0` + `Alembic` · `PostgreSQL` / `SQLite` · `APScheduler` ·
+`Pydantic v2` + `pydantic-settings` · `tenacity` · `aiolimiter` ·
+`structlog` · `Typer` + `Rich` · `pytest` + `pytest-asyncio` + `respx` ·
+`ruff` + `mypy`
+
+### Швидкий старт
+
+```bash
+python3 -m venv .venv
+./.venv/bin/pip install -e ".[dev]"
+./.venv/bin/scraper init-db
+cp config/sources.example.yaml config/sources.yaml   # увімкни потрібні джерела
+./.venv/bin/scraper seed --config-file config/sources.yaml
+./.venv/bin/scraper test-source --config-file config/sources.yaml --name "Example: static news site"
+./.venv/bin/pytest -q
+```
+
+CI (`.github/workflows/ci.yml`) на кожен push запускає `ruff check`, `mypy` і
+`pytest`.
+
+### Деплой
+
+- `docker compose -f docker/docker-compose.yml up --build -d` — Postgres +
+  сервіс, з healthcheck'ом одразу з коробки.
+- Systemd-юніт для bare-metal-деплою — `deploy/scraper.service` +
+  `deploy/healthcheck.sh` (hardening: `ProtectSystem=strict`,
+  `NoNewPrivileges`, ліміти пам'яті, graceful restart-policy).
+
+<a name="uk-scope"></a>
+
+### Що показано, а що ні
+
+Публічна версія повністю демонструє архітектуру: конкурентність,
+роботу з БД, дедуплікацію, відмовостійкість, деплой. **Не включено**
+робочу реалізацію парсингу розмітки Telegram-каналу
+(`extractors/telegram_extractor.py` — задокументована заглушка, що
+піднімає `NotImplementedError` з поясненням) — це єдина частина,
+яка в приватній версії містить конкретну, перевірену на практиці логіку,
+придатну для прямого комерційного використання без доопрацювання. Усе
+інше — HTML-екстрактор, планувальник, дедуплікація, конфігурація деплою
+— працює так само, як у продакшен-версії.
+
+### Автор
+
+**Vladyslav Shokun** ([@sonoyumi](https://github.com/sonoyumi)) — Python-розробник:
+Telegram-боти, парсинг, асинхронні сервіси.
+
+[![Telegram](https://img.shields.io/badge/Telegram-write%20me-2CA5E0?logo=telegram&logoColor=white)](https://t.me/sonoyumiii)
+[![Email](https://img.shields.io/badge/Email-contact-EA4335?logo=gmail&logoColor=white)](mailto:sonoyumiii@gmail.com)
+
+> 💼 Потрібен моніторинг сайтів, парсер чи бот під ваше завдання? Напишіть мені.
+
+### Ліцензія
+
+MIT — див. [LICENSE](LICENSE).
+
+---
+
 <a name="ru"></a>
 
 ## 🇷🇺 Русский
 
-**[🇬🇧 English](#en)** · **🇷🇺 Русский**
+**[🇬🇧 English](#en)** · **[🇮🇹 Italiano](#it)** · **[🇺🇦 Українська](#uk)** · **🇷🇺 Русский**
 
 Асинхронный сервис на Python для непрерывного (24/7) мониторинга публичных
 веб-сайтов и Telegram-каналов: находит новые публикации, дедуплицирует их на
